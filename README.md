@@ -11,8 +11,10 @@ The protocol engine lives in Python so the transaction rules and topology can be
 
 ## Run
 
+> **Note:** Requires Python 3.10+ (the `match` statement is used by dependencies). If your system `python` is older, use the full path to a newer Python installation.
+
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
