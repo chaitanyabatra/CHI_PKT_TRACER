@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CHI Packet Tracer</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Top toolbar -->
+  <header class="toolbar">
+    <div class="toolbar-left">
+      <div class="logo">CHI<span>Tracer</span></div>
+      <div class="sep"></div>
+      <button id="btn-reset" class="tool-btn" title="Reset fabric">&#x21bb; Reset</button>
+      <button id="btn-step" class="tool-btn" title="Step one event">&#x25B6; Step</button>
+      <button id="btn-play" class="tool-btn active-tool" title="Auto-play events">&#x23E9; Play All</button>
+    </div>
+    <div class="toolbar-right">
+      <label class="speed-control" title="Animation speed">
+        <span class="speed-icon">&#x23F5;</span>
+        <input type="range" id="speed-slider" min="1" max="10" value="5" />
+        <span id="speed-label" class="speed-val">1×</span>
+      </label>
+      <div class="status-pill" id="status-pill">Ready</div>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <!-- Sidebar: compact transaction controls -->
+    <aside class="sidebar" id="sidebar">
+      <section class="sb-section">
+        <h3>Transaction</h3>
+        <form id="txn-form" class="txn-form">
+          <select name="opcode" id="sel-opcode">
+            <option value="ReadShared">ReadShared</option>
+            <option value="WriteUnique">WriteUnique</option>
+            <option value="CleanShared">CleanShared</option>
+            <option value="MakeInvalid">MakeInvalid</option>
+          </select>
+          <div class="form-row">
+            <select name="src_id" id="sel-src"></select>
+            <input name="address" id="inp-addr" type="text" value="0x2000" placeholder="addr" />
+          </div>
+          <div class="form-row hidden" id="data-row">
+            <input name="data" id="inp-data" type="text" value="0xDADA5501" placeholder="data" />
+          </div>
+          <button type="submit" class="btn-send">&#x27A4; Send</button>
+        </form>
+      </section>
+
+      <section class="sb-section">
+        <h3>Scenarios</h3>
+        <div id="scenario-list" class="scenario-list"></div>
+      </section>
+
+      <section class="sb-section">
+        <h3>Channels</h3>
+        <div id="legend" class="legend"></div>
+      </section>
+    </aside>
+
+    <!-- Canvas: the main interactive fabric view -->
+    <main class="canvas-wrap">
+      <div class="canvas" id="canvas">
+        <svg id="svg-links" class="svg-links"></svg>
+        <div id="packet-layer" class="packet-layer"></div>
+        <div id="node-layer" class="node-layer"></div>
+      </div>
+      <!-- Floating summary toast -->
+      <div class="toast" id="toast"></div>
+    </main>
+
+    <!-- Inspector: appears on node click -->
+    <aside class="inspector closed" id="inspector">
+      <div class="insp-head">
+        <h3 id="insp-title">Inspector</h3>
+        <button id="close-insp" class="close-btn">&times;</button>
+      </div>
+      <div id="insp-body" class="insp-body"></div>
+    </aside>
+  </div>
+
+  <!-- Bottom drawer: timeline -->
+  <div class="drawer" id="drawer">
+    <div class="drawer-tab" id="drawer-tab">
+      <span>Timeline <span id="evt-count" class="badge">0</span></span>
+      <span id="drawer-arrow" class="arrow up">&#9650;</span>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </div>
+
+  <!-- Right-click context menu -->
+  <div class="ctx-menu hidden" id="ctx-menu"></div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
