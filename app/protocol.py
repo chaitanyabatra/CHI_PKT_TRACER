@@ -413,6 +413,8 @@ class Simulator:
             summary = self._simulate_clean_invalid(events, packet, address, src_id, home_id, entry)
         elif request.opcode == Opcode.MAKE_INVALID:
             summary = self._simulate_make_invalid(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.SILENT_DIRTY:
+            summary = self._simulate_silent_dirty(events, packet, address, src_id, home_id, entry, request.data)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported opcode {request.opcode.value}")
 
@@ -1543,6 +1545,61 @@ class Simulator:
         entry["sharers"] = set()
         entry["state_hint"] = "Invalid"
         return f"{packet.opcode} cleaned and invalidated all copies of {packet.addr} across the system."
+
+    # ------------------------------------------------------------------
+    # SilentDirty – local-only UC → UD upgrade (no wire traffic)
+    # ------------------------------------------------------------------
+    def _simulate_silent_dirty(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+        data: Optional[str],
+    ) -> str:
+        local_line = self.caches.get(src_id, {}).get(address)
+        if not local_line or local_line["state"] != "UC":
+            current = local_line["state"] if local_line else "I"
+            self._state(
+                events,
+                src=src_id,
+                dst=src_id,
+                title="SilentDirty skipped",
+                detail=(
+                    f"{src_id} cannot silently dirty {packet.addr} — "
+                    f"line is in state {current}, not UC."
+                ),
+            )
+            return f"{packet.opcode} skipped; {src_id} does not hold {packet.addr} in UC."
+
+        # Emit single local state event — no protocol traffic on the wire
+        self._state(
+            events,
+            src=src_id,
+            dst=src_id,
+            title="Silent UC → UD upgrade",
+            detail=(
+                f"{src_id} transitions {packet.addr} from UC to UD locally. "
+                f"No snoops or responses are sent."
+            ),
+        )
+
+        # Update cache line
+        local_line["state"] = "UD"
+        if data is not None:
+            local_line["data"] = data
+            local_line["note"] = f"Silently upgraded to UD by {src_id}; data updated to {data}."
+        else:
+            local_line["note"] = f"Silently upgraded to UD by {src_id} (data unchanged)."
+
+        # Update snoop filter to reflect unique dirty ownership
+        entry["owner"] = src_id
+        entry["sharers"] = set()
+        entry["state_hint"] = "UniqueDirty"
+
+        return f"{packet.opcode} upgraded {packet.addr} from UC to UD in {src_id} with no wire traffic."
 
     def _home_for_address(self, address: int) -> str:
         for region in self.address_map:

@@ -38,6 +38,7 @@ class Opcode(str, Enum):
     CLEAN_SHARED = "CleanShared"
     CLEAN_INVALID = "CleanInvalid"
     MAKE_INVALID = "MakeInvalid"
+    SILENT_DIRTY = "SilentDirty"
 
 
 class NodeModel(BaseModel):
