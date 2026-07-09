@@ -22,9 +22,21 @@ class Channel(str, Enum):
 
 
 class Opcode(str, Enum):
+    READ_NO_SNP = "ReadNoSnp"
+    READ_ONCE = "ReadOnce"
+    READ_CLEAN = "ReadClean"
     READ_SHARED = "ReadShared"
+    READ_UNIQUE = "ReadUnique"
+    READ_PREFER_UNIQUE = "ReadPreferUnique"
+    WRITE_NO_SNP_FULL = "WriteNoSnpFull"
     WRITE_UNIQUE = "WriteUnique"
+    WRITE_BACK_FULL = "WriteBackFull"
+    WRITE_CLEAN_FULL = "WriteCleanFull"
+    WRITE_EVICT_FULL = "WriteEvictFull"
+    CLEAN_UNIQUE = "CleanUnique"
+    MAKE_UNIQUE = "MakeUnique"
     CLEAN_SHARED = "CleanShared"
+    CLEAN_INVALID = "CleanInvalid"
     MAKE_INVALID = "MakeInvalid"
 
 

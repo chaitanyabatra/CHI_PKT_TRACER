@@ -373,14 +373,44 @@ class Simulator:
             ),
         )
 
-        if request.opcode == Opcode.READ_SHARED:
+        if request.opcode == Opcode.READ_NO_SNP:
+            summary = self._simulate_read_no_snp(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.READ_ONCE:
+            summary = self._simulate_read_once(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.READ_CLEAN:
+            summary = self._simulate_read_clean(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.READ_SHARED:
             summary = self._simulate_read_shared(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.READ_UNIQUE:
+            summary = self._simulate_read_unique(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.READ_PREFER_UNIQUE:
+            summary = self._simulate_read_prefer_unique(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.WRITE_NO_SNP_FULL:
+            summary = self._simulate_write_no_snp_full(
+                events, packet, address, src_id, home_id, entry, request.data
+            )
         elif request.opcode == Opcode.WRITE_UNIQUE:
             summary = self._simulate_write_unique(
                 events, packet, address, src_id, home_id, entry, request.data
             )
+        elif request.opcode == Opcode.WRITE_BACK_FULL:
+            summary = self._simulate_write_back_full(
+                events, packet, address, src_id, home_id, entry, request.data
+            )
+        elif request.opcode == Opcode.WRITE_CLEAN_FULL:
+            summary = self._simulate_write_clean_full(
+                events, packet, address, src_id, home_id, entry, request.data
+            )
+        elif request.opcode == Opcode.WRITE_EVICT_FULL:
+            summary = self._simulate_write_evict_full(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.CLEAN_UNIQUE:
+            summary = self._simulate_clean_unique(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.MAKE_UNIQUE:
+            summary = self._simulate_make_unique(events, packet, address, src_id, home_id, entry)
         elif request.opcode == Opcode.CLEAN_SHARED:
             summary = self._simulate_clean_shared(events, packet, address, src_id, home_id, entry)
+        elif request.opcode == Opcode.CLEAN_INVALID:
+            summary = self._simulate_clean_invalid(events, packet, address, src_id, home_id, entry)
         elif request.opcode == Opcode.MAKE_INVALID:
             summary = self._simulate_make_invalid(events, packet, address, src_id, home_id, entry)
         else:
@@ -776,6 +806,743 @@ class Simulator:
             entry["owner"] = None
         entry["state_hint"] = "Invalid" if not entry["sharers"] and not entry["owner"] else str(entry["state_hint"])
         return f"{packet.opcode} invalidated {src_id}'s local copy of {packet.addr} with no data movement."
+
+    # ------------------------------------------------------------------
+    # ReadNoSnp – non-coherent read (no snoops, data from home only)
+    # ------------------------------------------------------------------
+    def _simulate_read_no_snp(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        # Forward request to home node – no snoops are issued
+        self._send(
+            events,
+            channel=Channel.REQ.value,
+            src="ICN0",
+            dst=home_id,
+            title="ReadNoSnp forwarded to home",
+            detail=f"ICN0 forwards the non-coherent read for {packet.addr} to {home_id}. No snoops required.",
+            packet=packet,
+        )
+        self._credit(events, src=home_id, dst="ICN0", channel=Channel.REQ.value)
+
+        home_line = self._home_line(home_id, address)
+        data = home_line["data"]
+        self._send(
+            events,
+            channel=Channel.DAT.value,
+            src=home_id,
+            dst=src_id,
+            title="Home data return",
+            detail=f"{home_id} returns data for {packet.addr} to {src_id} via CompData.",
+            packet=packet.model_copy(update={"opcode": "CompData", "payload": data}),
+        )
+        self._credit(events, src=src_id, dst=home_id, channel=Channel.DAT.value)
+        self._send(
+            events,
+            channel=Channel.RSP.value,
+            src="ICN0",
+            dst=src_id,
+            title="ReadNoSnp complete",
+            detail=f"ICN0 confirms txn {packet.txnid} completed for ReadNoSnp.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        # Non-coherent reads do not update snoop filter or allocate in cache
+        return f"{packet.opcode} returned data from {home_id} to {src_id} without coherency tracking."
+
+    # ------------------------------------------------------------------
+    # ReadOnce – single read, no retention in cache after use
+    # ------------------------------------------------------------------
+    def _simulate_read_once(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        # Snoop dirty owner if present
+        owner = entry["owner"]
+        if owner and owner != src_id:
+            snoop_packet = packet.model_copy(update={"opcode": "SnpOnce", "tgtid": owner})
+            self._send(
+                events,
+                channel=Channel.SNP.value,
+                src="ICN0",
+                dst=owner,
+                title="Snoop dirty owner",
+                detail=f"ICN0 sends SnpOnce to {owner} for {packet.addr}.",
+                packet=snoop_packet,
+            )
+            self._credit(events, src=owner, dst="ICN0", channel=Channel.SNP.value)
+
+            owner_line = self.caches.get(owner, {}).get(address)
+            data = owner_line["data"] if owner_line else self._home_line(home_id, address)["data"]
+            self._send(
+                events,
+                channel=Channel.DAT.value,
+                src=owner,
+                dst=src_id,
+                title="Owner forwards data",
+                detail=f"{owner} supplies data for {packet.addr} directly to {src_id}.",
+                packet=packet.model_copy(update={"opcode": "CompData", "payload": data}),
+            )
+            self._credit(events, src=src_id, dst=owner, channel=Channel.DAT.value)
+            self._send(
+                events,
+                channel=Channel.RSP.value,
+                src=owner,
+                dst="ICN0",
+                title="Snoop response",
+                detail=f"{owner} acknowledges SnpOnce for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpResp_SC"}),
+            )
+            self._credit(events, src="ICN0", dst=owner, channel=Channel.RSP.value)
+
+            # Owner downgrades to SC (line stays cached in owner as shared-clean)
+            if owner_line:
+                owner_line["state"] = "SC"
+                owner_line["note"] = f"Downgraded to SC after serving ReadOnce for {src_id}."
+
+            home_line = self._home_line(home_id, address)
+            home_line["data"] = data
+            home_line["note"] = f"Refreshed from owner {owner}."
+            entry["owner"] = None
+            entry["sharers"] = set(entry["sharers"]) | {owner}
+        else:
+            # No dirty owner – fetch from home
+            self._send(
+                events,
+                channel=Channel.REQ.value,
+                src="ICN0",
+                dst=home_id,
+                title="Home lookup",
+                detail=f"ICN0 forwards ReadOnce to {home_id} for {packet.addr}.",
+                packet=packet,
+            )
+            self._credit(events, src=home_id, dst="ICN0", channel=Channel.REQ.value)
+            home_line = self._home_line(home_id, address)
+            data = home_line["data"]
+
+        self._send(
+            events,
+            channel=Channel.RSP.value,
+            src="ICN0",
+            dst=src_id,
+            title="ReadOnce complete",
+            detail=f"ICN0 confirms txn {packet.txnid} completed for ReadOnce.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        # ReadOnce: RN gets data but does NOT retain the line (transient read)
+        # We still record it briefly as SC for visibility but mark as transient
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "SC",
+            "data": data,
+            "note": f"Transient ReadOnce copy (not retained after use).",
+        }
+        entry["state_hint"] = "SharedClean"
+        return f"{packet.opcode} delivered data to {src_id} as a transient (non-retained) read."
+
+    # ------------------------------------------------------------------
+    # ReadClean – allocate in SC/UC state (no modification intent)
+    # ------------------------------------------------------------------
+    def _simulate_read_clean(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        local_line = self.caches.get(src_id, {}).get(address)
+        if local_line and local_line["state"] in ("SC", "UC"):
+            self._state(
+                events, src_id, src_id,
+                title="ReadClean hit",
+                detail=f"{src_id} already holds {packet.addr} in {local_line['state']}.",
+            )
+            self._send(
+                events, Channel.RSP.value, "ICN0", src_id,
+                title="ReadClean completed locally",
+                detail=f"No snoop required for {packet.addr}.",
+                packet=packet,
+            )
+            self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+            return f"{packet.opcode} hit in {src_id}; no state change."
+
+        # Snoop dirty owner if present
+        owner = entry["owner"]
+        if owner and owner != src_id:
+            snoop_packet = packet.model_copy(update={"opcode": "SnpCleanShared", "tgtid": owner})
+            self._send(
+                events, Channel.SNP.value, "ICN0", owner,
+                title="Snoop dirty owner",
+                detail=f"ICN0 sends SnpCleanShared to {owner} for {packet.addr}.",
+                packet=snoop_packet,
+            )
+            self._credit(events, src=owner, dst="ICN0", channel=Channel.SNP.value)
+
+            owner_line = self.caches.get(owner, {}).get(address)
+            data = owner_line["data"] if owner_line else self._home_line(home_id, address)["data"]
+            self._send(
+                events, Channel.DAT.value, owner, home_id,
+                title="Owner write-back",
+                detail=f"{owner} writes back dirty data for {packet.addr} to {home_id}.",
+                packet=packet.model_copy(update={"opcode": "CopyBackWrData", "payload": data}),
+            )
+            self._credit(events, src=home_id, dst=owner, channel=Channel.DAT.value)
+            self._send(
+                events, Channel.RSP.value, owner, "ICN0",
+                title="Snoop response",
+                detail=f"{owner} downgrades to SC for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpResp_SC"}),
+            )
+            self._credit(events, src="ICN0", dst=owner, channel=Channel.RSP.value)
+
+            if owner_line:
+                owner_line["state"] = "SC"
+                owner_line["note"] = "Downgraded to SC after ReadClean snoop."
+            home_line = self._home_line(home_id, address)
+            home_line["data"] = data
+            entry["owner"] = None
+            entry["sharers"] = set(entry["sharers"]) | {owner}
+        else:
+            self._send(
+                events, Channel.REQ.value, "ICN0", home_id,
+                title="Home lookup",
+                detail=f"ICN0 forwards ReadClean to {home_id} for {packet.addr}.",
+                packet=packet,
+            )
+            self._credit(events, src=home_id, dst="ICN0", channel=Channel.REQ.value)
+            home_line = self._home_line(home_id, address)
+            data = home_line["data"]
+
+        self._send(
+            events, Channel.DAT.value, home_id, src_id,
+            title="Data to requester",
+            detail=f"{home_id} returns {packet.addr} data to {src_id}.",
+            packet=packet.model_copy(update={"opcode": "CompData", "payload": data}),
+        )
+        self._credit(events, src=src_id, dst=home_id, channel=Channel.DAT.value)
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="ReadClean complete",
+            detail=f"ICN0 confirms txn {packet.txnid} for ReadClean.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "SC", "data": data,
+            "note": "Allocated as shared-clean by ReadClean.",
+        }
+        entry["sharers"] = set(entry["sharers"]) | {src_id}
+        entry["state_hint"] = "SharedClean"
+        return f"{packet.opcode} allocated {packet.addr} as shared-clean in {src_id}."
+
+    # ------------------------------------------------------------------
+    # ReadUnique – acquire exclusive ownership (invalidates all sharers)
+    # ------------------------------------------------------------------
+    def _simulate_read_unique(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        snoop_targets = set(entry["sharers"])
+        if entry["owner"]:
+            snoop_targets.add(str(entry["owner"]))
+        snoop_targets.discard(src_id)
+
+        data = None
+        for target in sorted(snoop_targets):
+            self._send(
+                events, Channel.SNP.value, "ICN0", target,
+                title="SnpUnique to sharer",
+                detail=f"ICN0 sends SnpUnique to {target} for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpUnique", "tgtid": target}),
+            )
+            self._credit(events, src=target, dst="ICN0", channel=Channel.SNP.value)
+
+            target_line = self.caches.get(target, {}).get(address)
+            if target_line and target_line["state"] == "UD":
+                data = target_line["data"]
+                self._send(
+                    events, Channel.DAT.value, target, src_id,
+                    title="Dirty data forwarded",
+                    detail=f"{target} forwards dirty data for {packet.addr} to {src_id}.",
+                    packet=packet.model_copy(update={"opcode": "CompData", "payload": data}),
+                )
+                self._credit(events, src=src_id, dst=target, channel=Channel.DAT.value)
+
+            self._send(
+                events, Channel.RSP.value, target, "ICN0",
+                title="Snoop response",
+                detail=f"{target} invalidates {packet.addr} in response to SnpUnique.",
+                packet=packet.model_copy(update={"opcode": "SnpRespI"}),
+            )
+            self._credit(events, src="ICN0", dst=target, channel=Channel.RSP.value)
+            self.caches.get(target, {}).pop(address, None)
+
+        if data is None:
+            self._send(
+                events, Channel.REQ.value, "ICN0", home_id,
+                title="Home lookup",
+                detail=f"ICN0 forwards ReadUnique to {home_id} for {packet.addr}.",
+                packet=packet,
+            )
+            self._credit(events, src=home_id, dst="ICN0", channel=Channel.REQ.value)
+            home_line = self._home_line(home_id, address)
+            data = home_line["data"]
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="ReadUnique complete",
+            detail=f"ICN0 grants unique ownership of {packet.addr} to {src_id}.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "UD", "data": data,
+            "note": "Unique dirty after ReadUnique.",
+        }
+        home_line = self._home_line(home_id, address)
+        home_line["data"] = data
+        entry["owner"] = src_id
+        entry["sharers"] = set()
+        entry["state_hint"] = "UniqueDirty"
+        return f"{packet.opcode} invalidated all peer copies; {src_id} now owns {packet.addr} uniquely."
+
+    # ------------------------------------------------------------------
+    # ReadPreferUnique – prefer unique, accept shared if already shared
+    # ------------------------------------------------------------------
+    def _simulate_read_prefer_unique(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        other_sharers = set(entry["sharers"]) - {src_id}
+        has_owner = bool(entry["owner"] and entry["owner"] != src_id)
+
+        if not other_sharers and not has_owner:
+            # No other copies – can return unique without snoops
+            home_line = self._home_line(home_id, address)
+            data = home_line["data"]
+            self._send(
+                events, Channel.RSP.value, "ICN0", src_id,
+                title="ReadPreferUnique (unique path)",
+                detail=f"No other copies exist; {src_id} gets unique access to {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "Comp"}),
+            )
+            self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+            self.caches.setdefault(src_id, {})[address] = {
+                "state": "UC", "data": data,
+                "note": "Unique clean after ReadPreferUnique (no snoops needed).",
+            }
+            entry["owner"] = src_id
+            entry["sharers"] = set()
+            entry["state_hint"] = "UniqueClean"
+            return f"{packet.opcode} returned unique-clean to {src_id} without snoops."
+
+        # Other sharers exist – fall back to shared (no invalidating snoops)
+        return self._simulate_read_shared(events, packet, address, src_id, home_id, entry)
+
+    # ------------------------------------------------------------------
+    # WriteNoSnpFull – non-coherent write (no snoops, DBIDResp flow)
+    # ------------------------------------------------------------------
+    def _simulate_write_no_snp_full(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+        data: Optional[str],
+    ) -> str:
+        payload = data or "0xDADA5501"
+        # HN sends DBIDResp granting permission to send data
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="DBIDResp granted",
+            detail=f"ICN0 sends DBIDResp to {src_id} for {packet.addr}.",
+            packet=packet.model_copy(update={"opcode": "DBIDResp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        # RN sends write data
+        self._send(
+            events, Channel.DAT.value, src_id, home_id,
+            title="Write data",
+            detail=f"{src_id} pushes write data for {packet.addr} to {home_id}.",
+            packet=packet.model_copy(update={"opcode": "WriteData", "payload": payload}),
+        )
+        self._credit(events, src=home_id, dst=src_id, channel=Channel.DAT.value)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="WriteNoSnpFull complete",
+            detail=f"ICN0 confirms txn {packet.txnid} for WriteNoSnpFull.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        home_line = self._home_line(home_id, address)
+        home_line["data"] = payload
+        home_line["note"] = f"Updated by non-coherent write from {src_id}."
+        return f"{packet.opcode} wrote data to {home_id} without coherency tracking."
+
+    # ------------------------------------------------------------------
+    # WriteBackFull – evict dirty line back to memory
+    # ------------------------------------------------------------------
+    def _simulate_write_back_full(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+        data: Optional[str],
+    ) -> str:
+        local_line = self.caches.get(src_id, {}).get(address)
+        if not local_line:
+            self._state(
+                events, src_id, src_id,
+                title="WriteBackFull – no local line",
+                detail=f"{src_id} has no local copy of {packet.addr}; sending zeros.",
+            )
+            payload = "0x00000000"
+        else:
+            payload = local_line["data"]
+
+        # HN sends CompDBIDResp (combined Comp + DBIDResp)
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="CompDBIDResp",
+            detail=f"ICN0 sends CompDBIDResp to {src_id} for {packet.addr}.",
+            packet=packet.model_copy(update={"opcode": "CompDBIDResp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        self._send(
+            events, Channel.DAT.value, src_id, home_id,
+            title="Dirty data write-back",
+            detail=f"{src_id} writes back dirty data for {packet.addr} to {home_id}.",
+            packet=packet.model_copy(update={"opcode": "WriteData", "payload": payload}),
+        )
+        self._credit(events, src=home_id, dst=src_id, channel=Channel.DAT.value)
+
+        # Comp is already combined in CompDBIDResp, so transaction is done
+        self._state(
+            events, src_id, src_id,
+            title="Line evicted",
+            detail=f"{src_id} transitions {packet.addr} to Invalid after write-back.",
+        )
+
+        self.caches.get(src_id, {}).pop(address, None)
+        home_line = self._home_line(home_id, address)
+        home_line["data"] = payload
+        home_line["note"] = f"Updated by WriteBackFull from {src_id}."
+        entry["sharers"] = set(entry["sharers"]) - {src_id}
+        if entry["owner"] == src_id:
+            entry["owner"] = None
+        entry["state_hint"] = "Invalid" if not entry["sharers"] and not entry["owner"] else str(entry["state_hint"])
+        return f"{packet.opcode} evicted dirty data from {src_id} to {home_id}; line is now invalid in {src_id}."
+
+    # ------------------------------------------------------------------
+    # WriteCleanFull – write back dirty data but retain in cache (clean)
+    # ------------------------------------------------------------------
+    def _simulate_write_clean_full(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+        data: Optional[str],
+    ) -> str:
+        local_line = self.caches.get(src_id, {}).get(address)
+        payload = data or (local_line["data"] if local_line else "0x00000000")
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="DBIDResp",
+            detail=f"ICN0 sends DBIDResp to {src_id} for {packet.addr}.",
+            packet=packet.model_copy(update={"opcode": "DBIDResp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        self._send(
+            events, Channel.DAT.value, src_id, home_id,
+            title="Clean write data",
+            detail=f"{src_id} writes data for {packet.addr} to {home_id}.",
+            packet=packet.model_copy(update={"opcode": "WriteData", "payload": payload}),
+        )
+        self._credit(events, src=home_id, dst=src_id, channel=Channel.DAT.value)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="WriteCleanFull complete",
+            detail=f"ICN0 confirms txn {packet.txnid} for WriteCleanFull.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        # RN retains line in clean state
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "SC", "data": payload,
+            "note": "Retained as shared-clean after WriteCleanFull.",
+        }
+        home_line = self._home_line(home_id, address)
+        home_line["data"] = payload
+        home_line["note"] = f"Updated by WriteCleanFull from {src_id}."
+        entry["sharers"] = set(entry["sharers"]) | {src_id}
+        if entry["owner"] == src_id:
+            entry["owner"] = None
+        entry["state_hint"] = "SharedClean"
+        return f"{packet.opcode} cleaned {packet.addr} in {src_id}; line retained as shared-clean."
+
+    # ------------------------------------------------------------------
+    # WriteEvictFull – evict clean line (no data transfer needed)
+    # ------------------------------------------------------------------
+    def _simulate_write_evict_full(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        self._send(
+            events, Channel.REQ.value, "ICN0", home_id,
+            title="WriteEvictFull to home",
+            detail=f"ICN0 notifies {home_id} that {src_id} is evicting clean {packet.addr}.",
+            packet=packet,
+        )
+        self._credit(events, src=home_id, dst="ICN0", channel=Channel.REQ.value)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="WriteEvictFull complete",
+            detail=f"ICN0 confirms txn {packet.txnid} for WriteEvictFull.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        self.caches.get(src_id, {}).pop(address, None)
+        entry["sharers"] = set(entry["sharers"]) - {src_id}
+        if entry["owner"] == src_id:
+            entry["owner"] = None
+        entry["state_hint"] = "Invalid" if not entry["sharers"] and not entry["owner"] else str(entry["state_hint"])
+        return f"{packet.opcode} evicted clean {packet.addr} from {src_id}; no data transfer required."
+
+    # ------------------------------------------------------------------
+    # CleanUnique – clean then upgrade to unique ownership
+    # ------------------------------------------------------------------
+    def _simulate_clean_unique(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        snoop_targets = set(entry["sharers"]) - {src_id}
+        if entry["owner"] and entry["owner"] != src_id:
+            snoop_targets.add(str(entry["owner"]))
+
+        for target in sorted(snoop_targets):
+            self._send(
+                events, Channel.SNP.value, "ICN0", target,
+                title="SnpCleanInvalid",
+                detail=f"ICN0 sends SnpCleanInvalid to {target} for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpCleanInvalid", "tgtid": target}),
+            )
+            self._credit(events, src=target, dst="ICN0", channel=Channel.SNP.value)
+
+            target_line = self.caches.get(target, {}).get(address)
+            if target_line and target_line["state"] == "UD":
+                tdata = target_line["data"]
+                self._send(
+                    events, Channel.DAT.value, target, home_id,
+                    title="Dirty write-back from sharer",
+                    detail=f"{target} writes back dirty data for {packet.addr} to {home_id}.",
+                    packet=packet.model_copy(update={"opcode": "CopyBackWrData", "payload": tdata}),
+                )
+                self._credit(events, src=home_id, dst=target, channel=Channel.DAT.value)
+                home_line = self._home_line(home_id, address)
+                home_line["data"] = tdata
+
+            self._send(
+                events, Channel.RSP.value, target, "ICN0",
+                title="Snoop response",
+                detail=f"{target} invalidates {packet.addr} after CleanUnique snoop.",
+                packet=packet.model_copy(update={"opcode": "SnpRespI"}),
+            )
+            self._credit(events, src="ICN0", dst=target, channel=Channel.RSP.value)
+            self.caches.get(target, {}).pop(address, None)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="CleanUnique complete",
+            detail=f"ICN0 grants unique ownership of {packet.addr} to {src_id}.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        home_line = self._home_line(home_id, address)
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "UC", "data": home_line["data"],
+            "note": "Upgraded to unique-clean after CleanUnique.",
+        }
+        entry["owner"] = src_id
+        entry["sharers"] = set()
+        entry["state_hint"] = "UniqueClean"
+        return f"{packet.opcode} invalidated peer copies; {src_id} now owns {packet.addr} uniquely (clean)."
+
+    # ------------------------------------------------------------------
+    # MakeUnique – acquire unique without data return (RN overwrites)
+    # ------------------------------------------------------------------
+    def _simulate_make_unique(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        snoop_targets = set(entry["sharers"]) - {src_id}
+        if entry["owner"] and entry["owner"] != src_id:
+            snoop_targets.add(str(entry["owner"]))
+
+        for target in sorted(snoop_targets):
+            self._send(
+                events, Channel.SNP.value, "ICN0", target,
+                title="SnpMakeInvalid",
+                detail=f"ICN0 sends SnpMakeInvalid to {target} for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpMakeInvalid", "tgtid": target}),
+            )
+            self._credit(events, src=target, dst="ICN0", channel=Channel.SNP.value)
+            self._send(
+                events, Channel.RSP.value, target, "ICN0",
+                title="Snoop response",
+                detail=f"{target} discards {packet.addr} after MakeUnique snoop.",
+                packet=packet.model_copy(update={"opcode": "SnpRespI"}),
+            )
+            self._credit(events, src="ICN0", dst=target, channel=Channel.RSP.value)
+            self.caches.get(target, {}).pop(address, None)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="MakeUnique complete",
+            detail=f"ICN0 confirms unique ownership of {packet.addr} for {src_id}.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        home_line = self._home_line(home_id, address)
+        self.caches.setdefault(src_id, {})[address] = {
+            "state": "UC", "data": home_line["data"],
+            "note": "Unique clean after MakeUnique (RN will overwrite).",
+        }
+        entry["owner"] = src_id
+        entry["sharers"] = set()
+        entry["state_hint"] = "UniqueClean"
+        return f"{packet.opcode} invalidated peers; {src_id} has unique-clean {packet.addr} (no data fetch)."
+
+    # ------------------------------------------------------------------
+    # CleanInvalid – clean all dirty copies then invalidate everywhere
+    # ------------------------------------------------------------------
+    def _simulate_clean_invalid(
+        self,
+        events: List[EventModel],
+        packet: PacketModel,
+        address: int,
+        src_id: str,
+        home_id: str,
+        entry: Dict[str, object],
+    ) -> str:
+        snoop_targets = set(entry["sharers"])
+        if entry["owner"]:
+            snoop_targets.add(str(entry["owner"]))
+        snoop_targets.discard(src_id)
+
+        for target in sorted(snoop_targets):
+            self._send(
+                events, Channel.SNP.value, "ICN0", target,
+                title="SnpCleanInvalid",
+                detail=f"ICN0 sends SnpCleanInvalid to {target} for {packet.addr}.",
+                packet=packet.model_copy(update={"opcode": "SnpCleanInvalid", "tgtid": target}),
+            )
+            self._credit(events, src=target, dst="ICN0", channel=Channel.SNP.value)
+
+            target_line = self.caches.get(target, {}).get(address)
+            if target_line and target_line["state"] == "UD":
+                tdata = target_line["data"]
+                self._send(
+                    events, Channel.DAT.value, target, home_id,
+                    title="Dirty write-back",
+                    detail=f"{target} writes back dirty data for {packet.addr} to {home_id}.",
+                    packet=packet.model_copy(update={"opcode": "CopyBackWrData", "payload": tdata}),
+                )
+                self._credit(events, src=home_id, dst=target, channel=Channel.DAT.value)
+                home_line = self._home_line(home_id, address)
+                home_line["data"] = tdata
+                home_line["note"] = f"Updated by write-back from {target} during CleanInvalid."
+
+            self._send(
+                events, Channel.RSP.value, target, "ICN0",
+                title="Snoop response",
+                detail=f"{target} invalidates {packet.addr} after CleanInvalid snoop.",
+                packet=packet.model_copy(update={"opcode": "SnpRespI"}),
+            )
+            self._credit(events, src="ICN0", dst=target, channel=Channel.RSP.value)
+            self.caches.get(target, {}).pop(address, None)
+
+        # Invalidate requester's copy too
+        self._state(
+            events, src_id, src_id,
+            title="Requester invalidated",
+            detail=f"{src_id} discards its local copy of {packet.addr}.",
+        )
+        self.caches.get(src_id, {}).pop(address, None)
+
+        self._send(
+            events, Channel.RSP.value, "ICN0", src_id,
+            title="CleanInvalid complete",
+            detail=f"All copies of {packet.addr} are invalidated; dirty data written back.",
+            packet=packet.model_copy(update={"opcode": "Comp"}),
+        )
+        self._credit(events, src=src_id, dst="ICN0", channel=Channel.RSP.value)
+
+        entry["owner"] = None
+        entry["sharers"] = set()
+        entry["state_hint"] = "Invalid"
+        return f"{packet.opcode} cleaned and invalidated all copies of {packet.addr} across the system."
 
     def _home_for_address(self, address: int) -> str:
         for region in self.address_map:
