@@ -33,10 +33,28 @@
         <h3>Transaction</h3>
         <form id="txn-form" class="txn-form">
           <select name="opcode" id="sel-opcode">
-            <option value="ReadShared">ReadShared</option>
-            <option value="WriteUnique">WriteUnique</option>
-            <option value="CleanShared">CleanShared</option>
-            <option value="MakeInvalid">MakeInvalid</option>
+            <optgroup label="Read Requests">
+              <option value="ReadNoSnp">ReadNoSnp</option>
+              <option value="ReadOnce">ReadOnce</option>
+              <option value="ReadClean">ReadClean</option>
+              <option value="ReadShared" selected>ReadShared</option>
+              <option value="ReadUnique">ReadUnique</option>
+              <option value="ReadPreferUnique">ReadPreferUnique</option>
+            </optgroup>
+            <optgroup label="Write Requests">
+              <option value="WriteNoSnpFull">WriteNoSnpFull</option>
+              <option value="WriteUnique">WriteUnique</option>
+              <option value="WriteBackFull">WriteBackFull</option>
+              <option value="WriteCleanFull">WriteCleanFull</option>
+              <option value="WriteEvictFull">WriteEvictFull</option>
+            </optgroup>
+            <optgroup label="Cache Maintenance">
+              <option value="CleanUnique">CleanUnique</option>
+              <option value="MakeUnique">MakeUnique</option>
+              <option value="CleanShared">CleanShared</option>
+              <option value="CleanInvalid">CleanInvalid</option>
+              <option value="MakeInvalid">MakeInvalid</option>
+            </optgroup>
           </select>
           <div class="form-row">
             <select name="src_id" id="sel-src"></select>

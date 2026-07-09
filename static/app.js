@@ -2,11 +2,21 @@
 const CH_COLOR = { REQ:'#ff9c52', SNP:'#36d1c4', RSP:'#ff5c97', DAT:'#5da9ff', CRD:'#f3d65a', ACT:'#b48efa' };
 
 const SCENARIOS = [
-  { label: 'Read from dirty owner', opcode:'ReadShared', src_id:'RN0', address:'0x2000' },
-  { label: 'Write shared line', opcode:'WriteUnique', src_id:'RN0', address:'0x1000', data:'0xDADA5501' },
-  { label: 'Clean shared CMO', opcode:'CleanShared', src_id:'RN1', address:'0x2800' },
-  { label: 'Invalidate self', opcode:'MakeInvalid', src_id:'RN0', address:'0x1000' },
+  { label: 'ReadShared from dirty owner', opcode:'ReadShared', src_id:'RN0', address:'0x2000' },
+  { label: 'ReadUnique (invalidate sharers)', opcode:'ReadUnique', src_id:'RN1', address:'0x1000' },
+  { label: 'ReadNoSnp (non-coherent)', opcode:'ReadNoSnp', src_id:'RN0', address:'0x1800' },
+  { label: 'WriteUnique (invalidate)', opcode:'WriteUnique', src_id:'RN0', address:'0x1000', data:'0xDADA5501' },
+  { label: 'WriteBackFull (evict dirty)', opcode:'WriteBackFull', src_id:'RN1', address:'0x2000' },
+  { label: 'CleanUnique (upgrade to unique)', opcode:'CleanUnique', src_id:'RN1', address:'0x1000' },
+  { label: 'CleanShared CMO', opcode:'CleanShared', src_id:'RN0', address:'0x2000' },
+  { label: 'CleanInvalid (clean + invalidate)', opcode:'CleanInvalid', src_id:'RN0', address:'0x1000' },
+  { label: 'MakeInvalid (discard)', opcode:'MakeInvalid', src_id:'RN0', address:'0x1000' },
 ];
+
+// Opcodes that carry write data on the DAT channel
+const DATA_OPCodes = new Set([
+  'WriteUnique', 'WriteNoSnpFull', 'WriteBackFull', 'WriteCleanFull',
+]);
 
 // ---- State ----
 let snapshot = null;
@@ -93,7 +103,7 @@ function renderScenarios() {
 }
 
 function syncDataRow() {
-  dom.dataRow.classList.toggle('hidden', dom.selOp.value !== 'WriteUnique');
+  dom.dataRow.classList.toggle('hidden', !DATA_OPCodes.has(dom.selOp.value));
 }
 
 // ---- Snapshot rendering ----
